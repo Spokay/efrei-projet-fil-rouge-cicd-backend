@@ -1,0 +1,29 @@
+{
+  "name": "efrei-projet-fil-rouge-cicd-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend.git"
+  },
+  "author": "Spokay",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend/issues"
+  },
+  "homepage": "https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend#readme",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.2",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
