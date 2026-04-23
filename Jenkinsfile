@@ -1,11 +1,9 @@
 pipeline {
-    agent { label 'vm-local' }
+    agent { label 'ssh-agent' }
     environment {
         AZURE_USER = 'azureuser'
-        AZURE_VM_HOST = '20.64.168.21'
+        AZURE_VM_HOST = '20.64.169.195'
         IMAGE = 'registry.spokayhub.top/efrei-projet-fil-rouge-cicd-backend'
-        IMAGE_TAG = ''
-        PREVIOUS_TAG = ''
     }
 
     stages {
@@ -17,7 +15,10 @@ pipeline {
             steps {
                 git branch: 'master', url: 'https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend.git'
                 script {
-                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    echo "Commit actuel : ${env.GIT_COMMIT}"
+                    echo "Build number : ${env.BUILD_NUMBER}"
+                    def shortCommit = env.GIT_COMMIT.take(7)
+                    env.IMAGE_TAG = env.BUILD_NUMBER + '-' + shortCommit
                     echo "Image tag: ${env.IMAGE_TAG}"
                 }
             }
@@ -27,6 +28,7 @@ pipeline {
             steps {
                 sh '''
                     docker build \
+                        --platform linux/arm64 \
                         -t $IMAGE:$IMAGE_TAG \
                         -t $IMAGE:latest \
                         .
@@ -48,7 +50,10 @@ pipeline {
         stage('Deploy') {
             steps {
                 sshagent(credentials: ['azure-ssh-credentials']) {
-                    withCredentials([usernamePassword(credentialsId: 'spokay-registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS')]) {
+                    withCredentials([
+                        usernamePassword(credentialsId: 'spokay-registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS'),
+                        file(credentialsId: 'fil-rouge-cicd-backend-env', variable: 'ENV_FILE')
+                    ]) {
                         script {
                             env.PREVIOUS_TAG = sh(
                                 script: """
@@ -61,14 +66,15 @@ pipeline {
                             echo "Déploiement de l'image : ${env.IMAGE}:${env.IMAGE_TAG}"
                         }
                         sh '''
-                            ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST \
-                                "docker login registry.spokayhub.top -u $REGISTRY_USER --password-stdin" \
-                                <<< "$REGISTRY_PASS"
+                            echo "$REGISTRY_PASS" | ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST \
+                                "docker login registry.spokayhub.top -u $REGISTRY_USER --password-stdin"
+
+                            scp -o StrictHostKeyChecking=no $ENV_FILE $AZURE_USER@$AZURE_VM_HOST:/home/$AZURE_USER/fil-rouge-cicd-backend.env
 
                             ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST "
                                 docker pull $IMAGE:$IMAGE_TAG &&
                                 docker rm -f fil-rouge-cicd-backend || true &&
-                                docker run -d -p 3000:3000 --name fil-rouge-cicd-backend $IMAGE:$IMAGE_TAG &&
+                                docker run -d -p 80:80 --restart unless-stopped --name fil-rouge-cicd-backend --env-file /home/$AZURE_USER/fil-rouge-cicd-backend.env $IMAGE:$IMAGE_TAG &&
                                 sleep 5 &&
                                 docker inspect -f '{{.State.Running}}' fil-rouge-cicd-backend | grep true
                             "
