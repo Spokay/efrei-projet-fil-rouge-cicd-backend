@@ -49,7 +49,7 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                sshagent(credentials: ['azure-ssh-credentials']) {
+                sshagent(credentials: ['azure-ssh-backend-credentials']) {
                     withCredentials([
                         usernamePassword(credentialsId: 'spokay-registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS'),
                         file(credentialsId: 'fil-rouge-cicd-backend-env', variable: 'ENV_FILE')
