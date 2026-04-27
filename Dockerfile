@@ -1,4 +1,4 @@
-FROM node:25.7.0-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -8,14 +8,14 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node:25.7.0-alpine AS runtime
+FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
 COPY --from=builder /app/node_modules /app/node_modules
-
 COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/public /app/public
 
 EXPOSE 3000
 
-ENTRYPOINT ["node", "dist/index.js" ]
+ENTRYPOINT ["node", "dist/src/main.js"]
