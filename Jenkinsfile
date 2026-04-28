@@ -1,9 +1,22 @@
 pipeline {
     agent { label 'ssh-agent' }
+    tools {
+        nodejs 'node-20'
+    }
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['stg', 'prod'], description: 'Environnement cible')
+        string(name: 'REGISTRY', defaultValue: 'registry.spokayhub.top', description: 'URL du registry Docker')
+        string(name: 'GIT_URL', defaultValue: 'https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend.git', description: 'URL du dépôt Git')
+        string(name: 'GIT_BRANCH', defaultValue: 'master', description: 'Branche à builder')
+        string(name: 'TARGET_PLATFORM', defaultValue: 'linux/arm64', description: 'Plateforme Docker build')
+        string(name: 'VM_HOST', defaultValue: '172.178.120.232', description: 'IP ou hostname de la VM cible')
+        string(name: 'VM_USER', defaultValue: 'azureuser', description: 'Utilisateur SSH sur la VM cible')
+    }
     environment {
-        AZURE_USER = 'azureuser'
-        AZURE_VM_HOST = '20.64.169.195'
-        IMAGE = 'registry.spokayhub.top/efrei-projet-fil-rouge-cicd-backend'
+        IMAGE_NAME     = 'efrei-projet-fil-rouge-cicd-backend'
+        IMAGE          = "${params.REGISTRY}/${IMAGE_NAME}"
+        COMPOSE_FILE   = "docker-compose.${params.DEPLOY_ENV}.yml"
+        CONTAINER_NAME = "${IMAGE_NAME}-${params.DEPLOY_ENV}"
     }
 
     stages {
@@ -13,7 +26,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'master', url: 'https://github.com/Spokay/efrei-projet-fil-rouge-cicd-backend.git'
+                git branch: params.GIT_BRANCH, url: params.GIT_URL
                 script {
                     echo "Commit actuel : ${env.GIT_COMMIT}"
                     echo "Build number : ${env.BUILD_NUMBER}"
@@ -24,21 +37,49 @@ pipeline {
             }
         }
 
-        stage('Build') {
+        stage('Test') {
             steps {
                 sh '''
-                    docker build \
-                        --platform linux/arm64 \
-                        -t $IMAGE:$IMAGE_TAG \
-                        -t $IMAGE:latest \
-                        .
+                    npm ci
+                    CI=true npm test -- --watchAll=false --coverage
                 '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+                    withSonarQubeEnv('sonar-spokay') {
+                        sh "${scannerHome}/bin/sonar-scanner"
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh """
+                    docker build \\
+                        --platform ${params.TARGET_PLATFORM} \\
+                        -t $IMAGE:$IMAGE_TAG \\
+                        -t $IMAGE:latest \\
+                        .
+                """
             }
         }
 
         stage('Push') {
             steps {
-                withDockerRegistry(credentialsId: 'spokay-registry-credentials', url: 'https://registry.spokayhub.top/') {
+                withDockerRegistry(credentialsId: 'registry-credentials', url: "https://${params.REGISTRY}/") {
                     sh '''
                         docker push $IMAGE:$IMAGE_TAG
                         docker push $IMAGE:latest
@@ -49,16 +90,18 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                sshagent(credentials: ['azure-ssh-backend-credentials']) {
+                sshagent(credentials: ["backend-${params.DEPLOY_ENV}-ssh-credentials"]) {
                     withCredentials([
-                        usernamePassword(credentialsId: 'spokay-registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS'),
-                        file(credentialsId: 'fil-rouge-cicd-backend-env', variable: 'ENV_FILE')
+                        usernamePassword(credentialsId: 'registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS'),
+                        file(credentialsId: "backend-${params.DEPLOY_ENV}-env", variable: 'ENV_FILE')
                     ]) {
                         script {
+                            env.VM_HOST = params.VM_HOST
+                            env.VM_USER = params.VM_USER
                             env.PREVIOUS_TAG = sh(
                                 script: """
-                                    ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST \
-                                    "docker inspect fil-rouge-cicd-backend --format '{{.Config.Image}}' 2>/dev/null || echo 'none'"
+                                    ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST \
+                                    "docker inspect $CONTAINER_NAME --format '{{.Config.Image}}' 2>/dev/null || echo 'none'"
                                 """,
                                 returnStdout: true
                             ).trim()
@@ -66,17 +109,18 @@ pipeline {
                             echo "Déploiement de l'image : ${env.IMAGE}:${env.IMAGE_TAG}"
                         }
                         sh '''
-                            echo "$REGISTRY_PASS" | ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST \
-                                "docker login registry.spokayhub.top -u $REGISTRY_USER --password-stdin"
+                            echo "$REGISTRY_PASS" | ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST \
+                                "docker login $REGISTRY -u $REGISTRY_USER --password-stdin"
 
-                            scp -o StrictHostKeyChecking=no $ENV_FILE $AZURE_USER@$AZURE_VM_HOST:/home/$AZURE_USER/fil-rouge-cicd-backend.env
+                            scp -o StrictHostKeyChecking=no $ENV_FILE $VM_USER@$VM_HOST:/tmp/backend-${DEPLOY_ENV}.env
+                            scp -o StrictHostKeyChecking=no $COMPOSE_FILE $VM_USER@$VM_HOST:/tmp/$COMPOSE_FILE
 
-                            ssh -o StrictHostKeyChecking=no $AZURE_USER@$AZURE_VM_HOST "
-                                docker pull $IMAGE:$IMAGE_TAG &&
-                                docker rm -f fil-rouge-cicd-backend || true &&
-                                docker run -d -p 80:80 --restart unless-stopped --name fil-rouge-cicd-backend --env-file /home/$AZURE_USER/fil-rouge-cicd-backend.env $IMAGE:$IMAGE_TAG &&
+                            ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "
+                                cd /tmp &&
+                                IMAGE_TAG=$IMAGE_TAG docker compose -f $COMPOSE_FILE pull &&
+                                IMAGE_TAG=$IMAGE_TAG docker compose -f $COMPOSE_FILE up -d &&
                                 sleep 5 &&
-                                docker inspect -f '{{.State.Running}}' fil-rouge-cicd-backend | grep true
+                                docker inspect -f '{{.State.Running}}' $CONTAINER_NAME | grep true
                             "
                         '''
                     }
@@ -87,11 +131,11 @@ pipeline {
 
     post {
         success {
-            echo "Déploiement de l'image ${env.IMAGE}:${env.IMAGE_TAG} réussi"
+            echo "Déploiement [${params.DEPLOY_ENV}] de l'image ${env.IMAGE}:${env.IMAGE_TAG} réussi"
         }
         failure {
             echo """
-                Déploiement échoué
+                Déploiement [${params.DEPLOY_ENV}] échoué
                 Image en échec: ${env.IMAGE}:${env.IMAGE_TAG}
                 Dernière image fonctionnelle : ${env.PREVIOUS_TAG}
             """
