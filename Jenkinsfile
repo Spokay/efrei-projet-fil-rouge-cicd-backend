@@ -112,13 +112,15 @@ pipeline {
                             echo "$REGISTRY_PASS" | ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST \
                                 "docker login $REGISTRY -u $REGISTRY_USER --password-stdin"
 
-                            scp -o StrictHostKeyChecking=no $ENV_FILE $VM_USER@$VM_HOST:/tmp/backend-${DEPLOY_ENV}.env
-                            scp -o StrictHostKeyChecking=no $COMPOSE_FILE $VM_USER@$VM_HOST:/tmp/$COMPOSE_FILE
+                            ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "mkdir -p ~/.deploy && rm -f ~/.deploy/backend-${DEPLOY_ENV}.env"
+
+                            scp -o StrictHostKeyChecking=no $ENV_FILE $VM_USER@$VM_HOST:~/.deploy/backend-${DEPLOY_ENV}.env
+                            scp -o StrictHostKeyChecking=no $COMPOSE_FILE $VM_USER@$VM_HOST:~/.deploy/$COMPOSE_FILE
 
                             ssh -o StrictHostKeyChecking=no $VM_USER@$VM_HOST "
-                                cd /tmp &&
+                                cd ~/.deploy &&
                                 IMAGE_TAG=$IMAGE_TAG docker compose -f $COMPOSE_FILE pull &&
-                                IMAGE_TAG=$IMAGE_TAG docker compose -f $COMPOSE_FILE up -d &&
+                                IMAGE_TAG=$IMAGE_TAG docker compose -f $COMPOSE_FILE up -d --force-recreate --remove-orphans &&
                                 sleep 5 &&
                                 docker inspect -f '{{.State.Running}}' $CONTAINER_NAME | grep true
                             "
